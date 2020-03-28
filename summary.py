@@ -1,0 +1,110 @@
+import os
+import argparse
+import cv2
+from sklearn.feature_extraction.image import extract_patches_2d
+
+
+def load_patches(img):
+    return extract_patches_2d(
+        image=img,
+        patch_size=(64, 64),
+        max_patches=100,
+        random_state=3,
+    )
+
+
+def load_img(img_path):
+    return cv2.imread(img_path)
+
+
+def load_frames(video_path, frame_step=24):
+    frames = []
+    count = 0
+
+    vidcap = cv2.VideoCapture(video_path)
+    success, image = vidcap.read()
+    frames.append(image)
+
+    while success:
+        count += 1
+        success, image = vidcap.read()
+        if success and count % frame_step == 0:
+            frames.append(image)
+
+    return frames, int(vidcap.get(cv2.CAP_PROP_FPS))
+
+
+def extract_histogram(img):
+    return cv2.calcHist([img], [0, 1, 2], None, [8, 8, 8], [0, 256, 0, 256, 0, 256])
+
+
+def hist_intersect(hist_a, hist_b):
+    return cv2.compareHist(hist_a, hist_b, cv2.HISTCMP_INTERSECT)
+
+
+def compose_summary_video(output_filename, frames, change_indices, fps=24, window_size=64):
+    frame_ranges = [list(range(
+        idx - int(window_size / 2),
+        idx + int(window_size / 2)
+    )) for idx in change_indices]
+
+    frames_to_write = [frame_index for sublist in frame_ranges for frame_index in sublist]
+
+    os.system('mkdir test; rm -f ./tmp/*')
+    frames_written = 0
+    for i, frame in enumerate(frames):
+        if i in frames_to_write:
+            print(f'writing test/img{str(frames_written).zfill(5)}.png')
+            cv2.imwrite(f'test/img{str(frames_written).zfill(5)}.png', frame)
+            frames_written += 1
+    os.system(f'ffmpeg -r {fps} -i test/img%05d.png {output_filename}')
+
+
+def detect_changes(histograms, change_threshold=3000.0):
+    intersects = []
+    first_frame = second_frame = None
+    for i, hist in enumerate(histograms):
+        if not first_frame:
+            first_frame = hist
+        else:
+            second_frame = hist
+            intersects.append({
+                'frame_index': i,
+                'intersect': compare_frames(first_frame, second_frame)
+            })
+            first_frame = second_frame = None
+    return [i['frame_index'] for i in intersects if i['intersect'] < change_threshold]
+
+
+def compare_frames(frame_a, frame_b):
+    # compare histogram intersects of all patches in the given frames
+    # returns average intersect
+    patch_intersects = [hist_intersect(patch_hist, frame_b[i]) for i, patch_hist in enumerate(frame_a)]
+    return sum(patch_intersects) / len(patch_intersects)
+
+
+def main():
+    args = get_args()
+    input_video = args.input_video
+    output_video = args.output_filename
+    change_threshold = args.change_threshold
+
+    frames, fps = load_frames(input_video)
+    patches = [load_patches(frame) for frame in frames]
+    histograms = [[extract_histogram(patch) for patch in frame_patches] for frame_patches in patches]
+
+    change_indices = detect_changes(histograms, change_threshold)
+
+    compose_summary_video(output_video, frames, change_indices, fps=fps)
+
+
+def get_args():
+    parser = argparse.ArgumentParser(description='Program to summarize a video by finding sequences with the highest changes.')
+    parser.add_argument('input_video', help='Input video file path')
+    parser.add_argument('change_threshold', type=float, help='Threshold to determine how big a change is considered to be a change')
+    parser.add_argument('output_filename', help='Output video file name')
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    main()
